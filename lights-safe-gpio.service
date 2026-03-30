@@ -1,0 +1,13 @@
+[Unit]
+Description=Set MOSFET GPIO pins LOW on boot (safety guard for lights)
+After=local-fs.target
+Before=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/malberto/robot.beginner/venv/bin/python /home/malberto/robot.beginner/mosfet_safety.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
