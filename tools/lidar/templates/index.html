@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>6WD Robot - OS-RADAR v1.8</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body { background: #080808; color: #0f0; font-family: 'Courier New', monospace; display: flex; margin: 0; height: 100vh; overflow: hidden; }
+        #sidebar { width: 320px; padding: 20px; background: #111; border-right: 1px solid #222; display: flex; flex-direction: column; box-shadow: 5px 0 15px rgba(0,0,0,0.5); z-index: 10; }
+        #canvas-container { flex-grow: 1; display: flex; justify-content: center; align-items: center; background: #000; position: relative; }
+        
+        .metric-card { background: #181818; padding: 15px; border-radius: 4px; margin-bottom: 15px; border-left: 4px solid #0f0; transition: 0.3s; }
+        .m-label { color: #555; font-size: 0.7em; text-transform: uppercase; letter-spacing: 1px; }
+        .m-value { font-size: 1.6em; font-weight: bold; font-family: 'Orbitron', sans-serif; }
+        .unit { font-size: 0.5em; color: #444; margin-left: 5px; }
+
+        canvas { background: radial-gradient(circle, #0a1a0a 0%, #000 100%); border-radius: 50%; cursor: crosshair; }
+        
+        .ctrl { margin-bottom: 15px; }
+        label { font-size: 0.8em; color: #888; }
+        input[type=range] { width: 100%; accent-color: #0f0; cursor: pointer; margin-top: 5px; }
+        #motor-btn { width: 100%; padding: 15px; font-weight: bold; border: none; cursor: pointer; border-radius: 4px; text-transform: uppercase; letter-spacing: 1px; }
+        .btn-on { background: #0f0; color: #000; box-shadow: 0 0 10px rgba(0,255,0,0.2); }
+        .btn-off { background: #f00; color: #fff; }
+        
+        #status { font-size: 0.75em; text-align: center; padding: 10px; background: #1a1a1a; margin-bottom: 20px; border: 1px solid #333; border-radius: 4px; }
+        .legend { margin-top: auto; font-size: 0.7em; color: #444; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <h2 style="margin:0 0 10px 0; color: #fff; border-bottom: 1px solid #222; padding-bottom: 10px;">OS-RADAR v1.8</h2>
+        <div id="status">INITIALIZING...</div>
+
+        <div class="metric-card">
+            <div class="m-label">Closest Obstacle</div>
+            <div id="min-dist" class="m-value">0<span class="unit">mm</span></div>
+        </div>
+
+        <div class="metric-card" style="border-left-color: #00ffff;">
+            <div class="m-label">Furthest Detection</div>
+            <div id="max-dist" class="m-value" style="color: #00ffff;">0<span class="unit">mm</span></div>
+        </div>
+
+        <div class="ctrl">
+            <button id="motor-btn" class="btn-on">STOP SCANNER</button>
+        </div>
+
+        <div class="ctrl">
+            <label>Smoothing (Scan Avg)</label>
+            <input type="range" id="avg" min="1" max="15" value="3">
+        </div>
+
+        <div class="ctrl">
+            <label>Static Map Sensitivity</label>
+            <input type="range" id="sens" min="10" max="300" value="50">
+        </div>
+
+        <div class="ctrl">
+            <label>Map Persistence (sec)</label>
+            <input type="range" id="persist" min="1" max="30" value="5">
+        </div>
+        
+        <div class="legend">
+            <p><b style="color:#f00">?</b> RED: ACTIVE TARGET<br>
+               <b style="color:#fff">?</b> WHITE: MAPPED ENV<br>
+               <b style="color:yellow">---</b> YELLOW: MIN DIST VECTOR<br>
+               <b style="color:#00ffff"></b> CYAN: MAX REACH VECTOR</p>
+        </div>
+    </div>
+
+    <div id="canvas-container">
+        <canvas id="radar"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('radar');
+        const ctx = canvas.getContext('2d');
+        const socket = io();
+        const motorBtn = document.getElementById('motor-btn');
+        const statusDiv = document.getElementById('status');
+
+        canvas.width = 800; canvas.height = 800;
+        const scale = 0.12; 
+
+        socket.on('lidar_status', (data) => {
+            statusDiv.innerText = "SYSTEM: " + data.status.toUpperCase();
+        });
+
+        socket.on('lidar_data', (data) => {
+            const { points, metrics } = data;
+
+            // Update UI Sidebar
+            document.getElementById('min-dist').innerHTML = `${metrics.min}<span class="unit">mm</span>`;
+            document.getElementById('max-dist').innerHTML = `${metrics.max}<span class="unit">mm</span>`;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+
+            // --- 1. DRAW MEASUREMENT VECTORS ---
+            
+            // Closest (Yellow - Dashed)
+            if (metrics.min_p) {
+                ctx.setLineDash([5, 5]);
+                ctx.strokeStyle = 'rgba(255, 255, 0, 0.6)';
+                ctx.lineWidth = 1;
+                ctx.beginPath(); 
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + (metrics.min_p.x * scale), cy - (metrics.min_p.y * scale));
+                ctx.stroke();
+            }
+
+            // Furthest (Cyan - Solid & Bright)
+            if (metrics.max_p) {
+                ctx.setLineDash([]); 
+                ctx.strokeStyle = '#00ffff'; 
+                ctx.lineWidth = 2;
+                ctx.beginPath(); 
+                ctx.moveTo(cx, cy);
+                const tx = cx + (metrics.max_p.x * scale);
+                const ty = cy - (metrics.max_p.y * scale);
+                ctx.lineTo(tx, ty);
+                ctx.stroke();
+
+                // On-Canvas Label for Furthest Point
+                ctx.fillStyle = '#00ffff';
+                ctx.font = "bold 11px monospace";
+                ctx.fillText(`${metrics.max}mm`, tx + 10, ty);
+            }
+
+            // --- 2. DRAW BACKGROUND GRID ---
+            ctx.setLineDash([]);
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = '#151515';
+            [1000, 2000, 3000, 4000].forEach(r => {
+                ctx.beginPath(); 
+                ctx.arc(cx, cy, r * scale, 0, Math.PI * 2); 
+                ctx.stroke();
+                // Add meter labels to rings
+                ctx.fillStyle = '#222';
+                ctx.font = "10px Arial";
+                ctx.fillText((r/1000)+"m", cx + (r*scale) + 5, cy);
+            });
+
+            // --- 3. DRAW ROBOT ---
+            ctx.strokeStyle = '#333';
+            ctx.strokeRect(cx - (110 * scale), cy - (165 * scale), 220 * scale, 330 * scale);
+            
+            // Heading Indicator (Green Arrow)
+            ctx.fillStyle = '#0f0';
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - (165 * scale) - 15);
+            ctx.lineTo(cx - 8, cy - (165 * scale));
+            ctx.lineTo(cx + 8, cy - (165 * scale));
+            ctx.fill();
+
+            // --- 4. DRAW SCAN POINTS ---
+            points.forEach(p => {
+                ctx.fillStyle = p.isNew ? '#f00' : '#fff';
+                ctx.beginPath();
+                ctx.arc(cx + (p.x * scale), cy - (p.y * scale), p.isNew ? 3 : 1.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        });
+
+        // Setup Control Listeners
+        ['avg', 'sens', 'persist'].forEach(id => {
+            document.getElementById(id).oninput = (e) => {
+                socket.emit('update_params', { [id]: e.target.value });
+            };
+        });
+
+        motorBtn.onclick = () => {
+            const isOn = motorBtn.classList.contains('btn-on');
+            socket.emit('toggle_motor', { state: !isOn });
+            motorBtn.className = isOn ? 'btn-off' : 'btn-on';
+            motorBtn.innerText = isOn ? "START SCANNER" : "STOP SCANNER";
+        };
+    </script>
+</body>
+</html>
